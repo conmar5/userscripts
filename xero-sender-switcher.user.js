@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xero Sender Switcher
 // @namespace    https://github.com/conmar5
-// @version      1.1.1
+// @version      1.1.2
 // @description  Adds a "Send from" selector to Xero's quote and invoice email dialogs. Pre-selects the sender from the contact's default branding theme, and leaves it blank when the contact has none.
 // @author       conmar5
 // @match        https://go.xero.com/app/*
@@ -9,6 +9,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      go.xero.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -28,10 +30,29 @@
     return (v && typeof v === 'object') ? v : {};
   }
 
-  // Tampermonkey runs granted scripts in a sandbox. Use the page's own fetch and
-  // storage, with absolute URLs, so requests carry the Xero session like the app's do.
+  // Tampermonkey runs granted scripts in a sandbox where the page's fetch fails.
+  // Requests go through GM_xmlhttpRequest instead, which sends the Xero session cookies.
+  // Returns a small fetch-like response: { ok, status, text(), json() }.
   const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-  const xfetch = (path, opts) => W.fetch(location.origin + path, opts);
+  function xfetch(path, opts = {}) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: opts.method || 'GET',
+        url: location.origin + path,
+        headers: opts.headers || {},
+        data: opts.body,
+        anonymous: false,
+        onload: r => resolve({
+          ok: r.status >= 200 && r.status < 300,
+          status: r.status,
+          text: async () => r.responseText,
+          json: async () => JSON.parse(r.responseText),
+        }),
+        onerror: () => reject(new Error('Request failed for ' + path)),
+        ontimeout: () => reject(new Error('Request timed out for ' + path)),
+      });
+    });
+  }
 
   const OIDC_KEY = 'oidc.user:https://identity.xero.com:xero_business_go';
   const BAR_ID = 'xss-sender-switcher';
