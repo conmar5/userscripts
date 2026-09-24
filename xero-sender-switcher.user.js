@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xero Sender Switcher
 // @namespace    https://github.com/conmar5
-// @version      1.1.2
+// @version      1.1.3
 // @description  Adds a "Send from" selector to Xero's quote and invoice email dialogs. Pre-selects the sender from the contact's default branding theme, and leaves it blank when the contact has none.
 // @author       conmar5
 // @match        https://go.xero.com/app/*
@@ -11,6 +11,7 @@
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @connect      go.xero.com
+// @sandbox      JavaScript
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -30,11 +31,12 @@
     return (v && typeof v === 'object') ? v : {};
   }
 
-  // Tampermonkey runs granted scripts in a sandbox where the page's fetch fails.
-  // Requests go through GM_xmlhttpRequest instead, which sends the Xero session cookies.
-  // Returns a small fetch-like response: { ok, status, text(), json() }.
+  // Run in the page's own context (@sandbox JavaScript) so requests carry the Xero
+  // session exactly like Xero's own code. If the page fetch is unavailable, fall back
+  // to GM_xmlhttpRequest. Both return a fetch-like response: { ok, status, text(), json() }.
+  const LOG = (...a) => console.log('[SenderSwitcher]', ...a);
   const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-  function xfetch(path, opts = {}) {
+  function gmRequest(path, opts) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: opts.method || 'GET',
@@ -48,15 +50,26 @@
           text: async () => r.responseText,
           json: async () => JSON.parse(r.responseText),
         }),
-        onerror: () => reject(new Error('Request failed for ' + path)),
-        ontimeout: () => reject(new Error('Request timed out for ' + path)),
+        onerror: r => reject(new Error(`request failed for ${path} (${(r && (r.error || r.statusText || r.status)) || 'no detail'})`)),
+        ontimeout: () => reject(new Error('request timed out for ' + path)),
       });
     });
+  }
+  async function xfetch(path, opts = {}) {
+    try {
+      return await W.fetch(location.origin + path, opts);
+    } catch (e) {
+      LOG('page fetch failed, trying GM_xmlhttpRequest', e);
+      try {
+        return await gmRequest(path, opts);
+      } catch (e2) {
+        throw new Error(`page fetch: ${e.message}; GM request: ${e2.message}`);
+      }
+    }
   }
 
   const OIDC_KEY = 'oidc.user:https://identity.xero.com:xero_business_go';
   const BAR_ID = 'xss-sender-switcher';
-  const LOG = (...a) => console.log('[SenderSwitcher]', ...a);
 
   // ---------------------------------------------------------------------------
   // Xero settings endpoints (cookie + CSRF token, same as Settings > Email settings)
