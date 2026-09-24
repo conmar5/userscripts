@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xero Sender Switcher
 // @namespace    https://github.com/conmar5
-// @version      1.1.3
+// @version      1.2.0
 // @description  Adds a "Send from" selector to Xero's quote and invoice email dialogs. Pre-selects the sender from the contact's default branding theme, and leaves it blank when the contact has none.
 // @author       conmar5
 // @match        https://go.xero.com/app/*
@@ -9,9 +9,6 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
-// @grant        GM_xmlhttpRequest
-// @connect      go.xero.com
-// @sandbox      JavaScript
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -31,42 +28,9 @@
     return (v && typeof v === 'object') ? v : {};
   }
 
-  // Run in the page's own context (@sandbox JavaScript) so requests carry the Xero
-  // session exactly like Xero's own code. If the page fetch is unavailable, fall back
-  // to GM_xmlhttpRequest. Both return a fetch-like response: { ok, status, text(), json() }.
   const LOG = (...a) => console.log('[SenderSwitcher]', ...a);
   const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-  function gmRequest(path, opts) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: opts.method || 'GET',
-        url: location.origin + path,
-        headers: opts.headers || {},
-        data: opts.body,
-        anonymous: false,
-        onload: r => resolve({
-          ok: r.status >= 200 && r.status < 300,
-          status: r.status,
-          text: async () => r.responseText,
-          json: async () => JSON.parse(r.responseText),
-        }),
-        onerror: r => reject(new Error(`request failed for ${path} (${(r && (r.error || r.statusText || r.status)) || 'no detail'})`)),
-        ontimeout: () => reject(new Error('request timed out for ' + path)),
-      });
-    });
-  }
-  async function xfetch(path, opts = {}) {
-    try {
-      return await W.fetch(location.origin + path, opts);
-    } catch (e) {
-      LOG('page fetch failed, trying GM_xmlhttpRequest', e);
-      try {
-        return await gmRequest(path, opts);
-      } catch (e2) {
-        throw new Error(`page fetch: ${e.message}; GM request: ${e2.message}`);
-      }
-    }
-  }
+  const xfetch = (path, opts) => W.fetch(location.origin + path, opts);
 
   const OIDC_KEY = 'oidc.user:https://identity.xero.com:xero_business_go';
   const BAR_ID = 'xss-sender-switcher';
@@ -74,11 +38,56 @@
   // ---------------------------------------------------------------------------
   // Xero settings endpoints (cookie + CSRF token, same as Settings > Email settings)
   // ---------------------------------------------------------------------------
-  async function csrfToken() {
-    const html = await xfetch('/Settings/Email/', { credentials: 'include' }).then(r => r.text());
+  // Xero's older settings pages (/Settings/...) keep their own login session, which
+  // expires. When it has expired, requests are redirected to Xero's login page and fail.
+  // Loading the settings page in a hidden frame renews that session (the browser follows
+  // the sign-in redirects normally), and the security token is then read from the frame.
+  function tokenFromHtml(html) {
     const m = html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/);
-    if (!m) throw new Error('Could not read Xero security token. Are you still logged in?');
-    return m[1];
+    return m ? m[1] : null;
+  }
+
+  // Follows Xero's sign-in redirects in a hidden frame and stops it as soon as the
+  // browser is back on go.xero.com (the session cookie is set at that point), so the
+  // heavy settings page itself never has to load.
+  function renewSettingsSession() {
+    return new Promise((resolve, reject) => {
+      const f = document.createElement('iframe');
+      f.style.cssText = 'position:absolute;width:0;height:0;border:0;visibility:hidden';
+      f.src = location.origin + '/Settings/Email/';
+      let sawSignIn = false;
+      const finish = (err) => {
+        clearInterval(poll); clearTimeout(timer);
+        try { f.contentWindow.stop(); } catch (e) { /* ignore */ }
+        f.remove();
+        err ? reject(err) : resolve();
+      };
+      const poll = setInterval(() => {
+        let path = null;
+        try { path = f.contentWindow.location.pathname; } catch (e) { sawSignIn = true; return; } // on login.xero.com
+        if (!path || path === 'blank') return;
+        if (/signin-oidc/i.test(path)) { sawSignIn = true; return; }
+        if (sawSignIn || /\/Settings\//i.test(path)) finish();
+      }, 200);
+      const timer = setTimeout(() => finish(new Error('Xero sign-in did not complete. Open Settings > Email settings once, then try again.')), 45000);
+      document.body.appendChild(f);
+    });
+  }
+
+  async function csrfToken() {
+    try {
+      const r = await xfetch('/Settings/Email/', { credentials: 'include', redirect: 'manual' });
+      if (r.ok) {
+        const t = tokenFromHtml(await r.text());
+        if (t) return t;
+      }
+    } catch (e) { LOG('settings page fetch failed, renewing session', e); }
+    LOG('renewing Xero settings session');
+    await renewSettingsSession();
+    const r2 = await xfetch('/Settings/Email/', { credentials: 'include', redirect: 'manual' });
+    const t2 = r2.ok ? tokenFromHtml(await r2.text()) : null;
+    if (!t2) throw new Error('Could not renew the Xero settings session. Open Settings > Email settings once, then try again.');
+    return t2;
   }
 
   async function settingsPost(url, body, token) {
