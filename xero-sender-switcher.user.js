@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xero Sender Switcher
 // @namespace    https://github.com/conmar5
-// @version      1.2.0
+// @version      1.3.0
 // @description  Adds a "Send from" selector to Xero's quote and invoice email dialogs. Pre-selects the sender from the contact's default branding theme, and leaves it blank when the contact has none.
 // @author       conmar5
 // @match        https://go.xero.com/app/*
@@ -9,6 +9,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @updateURL    https://raw.githubusercontent.com/conmar5/userscripts/main/xero-sender-switcher.user.js
+// @downloadURL  https://raw.githubusercontent.com/conmar5/userscripts/main/xero-sender-switcher.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -26,6 +28,12 @@
   function loadMapping() {
     const v = GM_getValue(STORE_KEY, {});
     return (v && typeof v === 'object') ? v : {};
+  }
+  // Themes the user chose not to map (kept so they are not asked again).
+  const IGNORE_KEY = 'ignoredThemes';
+  function loadIgnored() {
+    const v = GM_getValue(IGNORE_KEY, []);
+    return Array.isArray(v) ? v : [];
   }
 
   const LOG = (...a) => console.log('[SenderSwitcher]', ...a);
@@ -239,6 +247,40 @@
     }
   }
 
+  // Adds a row to the bar for each branding theme that has no sender and has not been
+  // ignored. The user picks a sender (saved to Tampermonkey storage) or ignores the theme.
+  async function promptUnmappedThemes(bar, senders, onSaved) {
+    const names = Object.values(await themeNames());
+    const mapping = loadMapping();
+    const ignored = loadIgnored();
+    const unmapped = names.filter(n => !/^OLD/i.test(n) && !(n in mapping) && !ignored.includes(n));
+    if (!unmapped.length) return;
+    const options = senders.filter(s => s.verified)
+      .map(s => `<option value="${s.id}">${s.name} &lt;${s.address}&gt;</option>`).join('');
+    unmapped.forEach(themeName => {
+      const row = document.createElement('div');
+      row.style.cssText = 'flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px dashed #c7d3de;font-size:13px';
+      row.innerHTML = `<span>Branding theme <b></b> has no sender set. Send it from:</span>
+        <select style="padding:4px 6px"><option value="">— Choose —</option>${options}</select>
+        <button type="button" data-act="save" style="padding:4px 10px">Save</button>
+        <button type="button" data-act="ignore" style="padding:4px 10px">Ignore this theme</button>`;
+      row.querySelector('b').textContent = `"${themeName}"`;
+      const pick = row.querySelector('select');
+      row.querySelector('[data-act=save]').addEventListener('click', () => {
+        const sender = senders.find(s => s.id === pick.value);
+        if (!sender) { pick.focus(); return; }
+        const m = loadMapping(); m[themeName] = sender.address; GM_setValue(STORE_KEY, m);
+        row.remove();
+        onSaved(themeName, sender);
+      });
+      row.querySelector('[data-act=ignore]').addEventListener('click', () => {
+        const ig = loadIgnored(); if (!ig.includes(themeName)) ig.push(themeName); GM_setValue(IGNORE_KEY, ig);
+        row.remove();
+      });
+      bar.appendChild(row);
+    });
+  }
+
   async function enhance(dialog) {
     if (dialog.querySelector('#' + BAR_ID)) return;
     const bar = buildBar();
@@ -273,6 +315,7 @@
     // Work out the default from the contact's branding theme.
     let auto = null;
     let reason = '';
+    let docThemeName = null;
     try {
       const info = await contactDefaultTheme();
       if (!info) {
@@ -282,6 +325,7 @@
       } else {
         const names = await themeNames();
         const themeName = names[info.themeId];
+        docThemeName = themeName;
         const mapping = loadMapping();
         const addr = mapping[themeName];
         auto = addr ? senders.find(s => s.address === addr.toLowerCase()) : null;
@@ -313,6 +357,14 @@
       if (sel.value) applySelection(bar, senders, sel.value);
       else setStatus(bar, `No sender chosen. Xero's current default will be used.`, 'warn');
     });
+
+    // Ask about any branding theme that has no sender yet (for example a newly added theme).
+    promptUnmappedThemes(bar, senders, (themeName, sender) => {
+      if (themeName === docThemeName && !sel.value) {
+        sel.value = sender.id;
+        applySelection(bar, senders, sender.id);
+      }
+    }).catch(e => LOG('unmapped theme check failed', e));
 
     // Safety check on Send: block if nothing chosen, or if Xero's default has drifted.
     const sendBtn = findSendButton(dialog);
