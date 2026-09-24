@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Xero Sender Switcher
 // @namespace    https://github.com/conmar5
-// @version      1.1.0
+// @version      1.1.1
 // @description  Adds a "Send from" selector to Xero's quote and invoice email dialogs. Pre-selects the sender from the contact's default branding theme, and leaves it blank when the contact has none.
 // @author       conmar5
 // @match        https://go.xero.com/app/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -27,6 +28,11 @@
     return (v && typeof v === 'object') ? v : {};
   }
 
+  // Tampermonkey runs granted scripts in a sandbox. Use the page's own fetch and
+  // storage, with absolute URLs, so requests carry the Xero session like the app's do.
+  const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const xfetch = (path, opts) => W.fetch(location.origin + path, opts);
+
   const OIDC_KEY = 'oidc.user:https://identity.xero.com:xero_business_go';
   const BAR_ID = 'xss-sender-switcher';
   const LOG = (...a) => console.log('[SenderSwitcher]', ...a);
@@ -35,14 +41,14 @@
   // Xero settings endpoints (cookie + CSRF token, same as Settings > Email settings)
   // ---------------------------------------------------------------------------
   async function csrfToken() {
-    const html = await fetch('/Settings/Email/', { credentials: 'include' }).then(r => r.text());
+    const html = await xfetch('/Settings/Email/', { credentials: 'include' }).then(r => r.text());
     const m = html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/);
     if (!m) throw new Error('Could not read Xero security token. Are you still logged in?');
     return m[1];
   }
 
   async function settingsPost(url, body, token) {
-    const r = await fetch(url, {
+    const r = await xfetch(url, {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -85,10 +91,10 @@
   }
 
   async function appGet(path, appName) {
-    const raw = sessionStorage.getItem(OIDC_KEY);
+    const raw = W.sessionStorage.getItem(OIDC_KEY);
     if (!raw) throw new Error('Xero session token not found');
     const token = JSON.parse(raw).access_token;
-    const r = await fetch(path, {
+    const r = await xfetch(path, {
       credentials: 'include',
       headers: {
         'Authorization': 'Bearer ' + token,
